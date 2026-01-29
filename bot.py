@@ -76,7 +76,7 @@ async def ask_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context_text = "\n".join([d.page_content for d in docs])
 
         # Generate answer using Gemini
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.0-flash')
         rag_prompt = f"Using ONLY this signaling manual text, answer the question: {query}\n\nContext: {context_text}"
         response = model.generate_content(rag_prompt)
         
@@ -102,7 +102,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_caption = update.message.caption or "Analyze this signaling equipment/diagram. Identify components, faults, or readings."
         
         # 3. Send to Gemini (Multimodal)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.0-flash')
         response = model.generate_content([
             user_caption,
             {'mime_type': 'image/jpeg', 'data': bytes(image_bytes)}
@@ -122,7 +122,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = update.message.from_user.first_name
 
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.0-flash')
         response = model.generate_content(f"{SYSTEM_PROMPT}\n\nInput Chat: {user_text}")
         
         # Clean up code blocks if the model adds them
