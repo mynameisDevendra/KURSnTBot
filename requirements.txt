@@ -1,0 +1,12 @@
+python-telegram-bot
+google-generativeai
+python-dotenv
+pandas
+plotly
+streamlit
+pypdf
+faiss-cpu
+langchain
+langchain-google-genai
+langchain-google-community
+langchain-text-splitters
