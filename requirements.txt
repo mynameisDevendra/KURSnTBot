@@ -10,3 +10,4 @@ langchain
 langchain-google-genai
 langchain-google-community
 langchain-text-splitters
+cryptography
