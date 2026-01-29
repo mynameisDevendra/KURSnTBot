@@ -1,8 +1,6 @@
 import os
 import json
 import logging
-import subprocess
-import asyncio
 from dotenv import load_dotenv
 import google.generativeai as genai
 from telegram import Update
@@ -41,21 +39,6 @@ You are a Railway Signaling AI. Extract data from chat into JSON:
 If irrelevant, return "IGNORE".
 """
 
-# --- UTILITY: Self-Healing Knowledge Base ---
-def check_and_build_index():
-    """Checks if FAISS index exists; if not, rebuilds it."""
-    index_path = os.path.join(os.getcwd(), "faiss_index")
-    if not os.path.exists(index_path):
-        logging.warning("⚠️ FAISS Index not found! Starting self-healing build...")
-        try:
-            # Runs knowledge_base.py to generate the index
-            subprocess.run(["python", "knowledge_base.py"], check=True)
-            logging.info("✅ Knowledge base built successfully.")
-        except subprocess.CalledProcessError as e:
-            logging.error(f"❌ Failed to build knowledge base: {e}")
-    else:
-        logging.info("✅ FAISS Index found.")
-
 # --- LOGIC: /ask Command (The "Trainer" Check) ---
 async def ask_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args)
@@ -68,6 +51,10 @@ async def ask_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
         index_path = os.path.join(os.getcwd(), "faiss_index")
         
+        if not os.path.exists(index_path):
+            await update.message.reply_text("❌ Error: 'faiss_index' folder not found on server. Please upload it to GitHub.")
+            return
+
         # Load Local Index
         db = FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
         
@@ -98,9 +85,7 @@ async def ask_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         logging.error(f"Search Error: {e}")
-        await update.message.reply_text("❌ Error searching manuals. Attempting to restart brain... try again in 1 minute.")
-        # Trigger rebuild if it failed
-        check_and_build_index()
+        await update.message.reply_text("❌ Critical Error: Could not search manuals. Check Render logs.")
 
 # --- LOGIC: Photo Analysis (Multimodal) ---
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -163,15 +148,12 @@ if __name__ == '__main__':
     # 1. Initialize SQLite
     init_db()
     
-    # 2. Self-Healing: Build Knowledge Base if missing
-    check_and_build_index()
-    
-    # 3. Start Telegram Bot
+    # 2. Start Telegram Bot
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
     # Register Handlers
     app.add_handler(CommandHandler("ask", ask_manual))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo)) # New Photo Handler
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
     
     print("🚀 Railway AI Agent is LIVE and MONITORING...")
