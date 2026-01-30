@@ -48,24 +48,50 @@ def get_drive_service():
     return build('drive', 'v3', credentials=creds)
 
 def download_file_from_drive(filename):
-    """Searches for a file by name in Drive and downloads it to a temp file."""
+    """
+    Robust search that works even if extensions (.pdf) 
+    or trailing spaces are missing/mismatched in Drive.
+    """
     service = get_drive_service()
     if not service: return None
     
-    # 1. Search for the file ID by exact name
-    # We filter by 'trashed = false' to avoid deleted files
+    # 1. Clean the filename: Remove .pdf extension and extra spaces
+    # Example: "Annexure II Drawings.pdf" BECOMES "Annexure II Drawings"
+    clean_name = os.path.splitext(filename)[0].strip()
+    
+    logging.info(f"🔍 Searching Drive for file containing: '{clean_name}'")
+
+    # 2. Use 'contains' for a wider search (Fuzzy Match)
+    # We escape single quotes just in case the filename has them
+    safe_name = clean_name.replace("'", "\\'")
+    
     results = service.files().list(
-        q=f"name = '{filename}' and trashed = false",
-        pageSize=1, fields="files(id, name)").execute()
+        q=f"name contains '{safe_name}' and trashed = false",
+        pageSize=1, 
+        fields="files(id, name)"
+    ).execute()
     items = results.get('files', [])
 
     if not items:
-        logging.warning(f"⚠️ File '{filename}' not found in Drive.")
-        return None
+        logging.warning(f"⚠️ Search failed for '{clean_name}'. Checking strict match...")
+        # Fallback: Try the original filename just in case
+        results_strict = service.files().list(
+            q=f"name = '{filename}' and trashed = false",
+            pageSize=1, fields="files(id, name)"
+        ).execute()
+        items = results_strict.get('files', [])
+        
+        if not items:
+            logging.error(f"❌ File not found in Drive: {filename}")
+            return None
 
-    file_id = items[0]['id']
+    found_file = items[0]
+    file_id = found_file['id']
+    real_name = found_file['name']
     
-    # 2. Download the file stream
+    logging.info(f"✅ Found match in Drive: '{real_name}' (ID: {file_id})")
+    
+    # 3. Download the file stream
     request = service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
@@ -74,7 +100,7 @@ def download_file_from_drive(filename):
     while done is False:
         status, done = downloader.next_chunk()
 
-    # 3. Save to local temp file
+    # 4. Save to local temp file
     local_path = f"temp_{filename}"
     with open(local_path, 'wb') as f:
         f.write(fh.getbuffer())
