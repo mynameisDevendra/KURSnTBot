@@ -11,3 +11,6 @@ langchain-google-genai
 langchain-google-community
 langchain-text-splitters
 cryptography
+google-api-python-client
+google-auth
+pdf2image
