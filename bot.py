@@ -2,6 +2,8 @@ import os
 import json
 import logging
 import io
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from dotenv import load_dotenv
 import google.generativeai as genai
 from telegram import Update
@@ -293,9 +295,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Monitoring error: {e}")
 
+# --- RENDER HEALTH CHECK SERVER ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
+
+def start_health_check():
+    # Render assigns a port automatically in the PORT env var
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    print(f"✅ Health check server listening on port {port}")
+    server.serve_forever()
+
 # --- MAIN BOOTSTRAP ---
 if __name__ == '__main__':
+    # 1. Initialize SQLite
     init_db()
+    
+    # 2. Start Health Check Server (Daemon Thread)
+    threading.Thread(target=start_health_check, daemon=True).start()
+
+    # 3. Start Telegram Bot
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
     app.add_handler(CommandHandler("ask", ask_manual))
