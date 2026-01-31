@@ -2,19 +2,20 @@ import os
 import json
 import logging
 import io
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from datetime import datetime
 from dotenv import load_dotenv
 import google.generativeai as genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
+
+# Database Import
 from database import init_db, save_to_db
 
 # Knowledge Base Imports
 from langchain_community.vectorstores import FAISS
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
-# Drive & Image Imports
+# Drive & Sheets Imports
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
 from googleapiclient.http import MediaIoBaseDownload
@@ -25,6 +26,9 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
+# --- CONFIGURATION ---
+SPREADSHEET_ID = "1JqPBe5aQJDIGPNRs3zVCMUnIU6NDpf8dUXs1oJImNTg"  # <--- PASTE YOUR ID HERE
+
 # Configure Logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -34,13 +38,16 @@ logging.basicConfig(
 # Initialize Gemini
 genai.configure(api_key=GEMINI_API_KEY)
 
-# --- GOOGLE DRIVE SETUP ---
-SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+# --- GOOGLE SERVICES SETUP ---
+# Added 'spreadsheets' scope for writing to Sheets
+SCOPES = [
+    'https://www.googleapis.com/auth/drive.readonly',
+    'https://www.googleapis.com/auth/spreadsheets'
+]
 SERVICE_ACCOUNT_FILE = 'credentials.json' 
 
-def get_drive_service():
-    """Authenticates and returns the Drive service."""
-    # Check current directory and generic secret paths
+def get_credentials():
+    """Finds and loads the credentials file securely."""
     possible_paths = [
         SERVICE_ACCOUNT_FILE,
         f"/etc/secrets/{SERVICE_ACCOUNT_FILE}",
@@ -57,14 +64,61 @@ def get_drive_service():
         logging.error("❌ credentials.json not found in any standard path!")
         return None
         
-    creds = service_account.Credentials.from_service_account_file(
+    return service_account.Credentials.from_service_account_file(
         final_path, scopes=SCOPES)
+
+def get_drive_service():
+    """Returns the Drive service."""
+    creds = get_credentials()
+    if not creds: return None
     return build('drive', 'v3', credentials=creds)
 
+def get_sheets_service():
+    """Returns the Sheets service."""
+    creds = get_credentials()
+    if not creds: return None
+    return build('sheets', 'v4', credentials=creds)
+
+# --- GOOGLE SHEETS LOGGING ---
+def log_to_google_sheet(user_name, data, raw_text):
+    """Appends the transaction row to Google Sheets."""
+    try:
+        service = get_sheets_service()
+        if not service: return
+
+        # Prepare the row
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        values = [[
+            user_name,
+            data.get('category'),
+            data.get('item'),
+            data.get('quantity'),
+            data.get('location'),
+            data.get('status'),
+            data.get('sentiment'),
+            raw_text,
+            timestamp
+        ]]
+        
+        body = {'values': values}
+        
+        result = service.spreadsheets().values().append(
+            spreadsheetId=SPREADSHEET_ID,
+            range="Sheet1!A1", # Adjust 'Sheet1' if your tab is named differently
+            valueInputOption="USER_ENTERED",
+            body=body
+        ).execute()
+        
+        logging.info(f"✅ Google Sheet Updated: {result.get('updates').get('updatedCells')} cells.")
+        
+    except Exception as e:
+        logging.error(f"❌ Google Sheet Error: {e}")
+
+# --- DRIVE FILE HANDLING ---
 def list_debug_files():
     """Returns a list of the first 10 files the bot CAN see."""
     service = get_drive_service()
-    if not service: return ["❌ Error: Could not connect to Drive (Check credentials)."]
+    if not service: return ["❌ Error: Could not connect to Drive."]
     
     try:
         results = service.files().list(
@@ -126,7 +180,7 @@ def download_file_from_drive(filename):
         
     return local_path
 
-# Configuration for Data Extraction
+# --- CONFIGURATION FOR DATA EXTRACTION ---
 SYSTEM_PROMPT = """
 You are a Railway Signaling AI. Extract data from chat into JSON:
 {
@@ -220,7 +274,7 @@ async def ask_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Search Error: {e}")
         await update.message.reply_text("❌ Critical Error.")
 
-# --- LOGIC: Photo Analysis (Multimodal) ---
+# --- LOGIC: Photo Analysis ---
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.photo: return
 
@@ -244,33 +298,27 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Photo Error: {e}")
         await update.message.reply_text("❌ Failed to analyze image.")
 
-# --- LOGIC: Message Monitoring (Improved JSON Parsing) ---
+# --- LOGIC: Message Monitoring (Improved Parsing) ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 1. Ignore commands (lines starting with /)
     if not update.message or not update.message.text: return
     if update.message.text.startswith('/'): return
     
     user_text = update.message.text
     user_name = update.message.from_user.first_name
 
-    # --- MEMORY BLOCK START ---
+    # Memory
     if 'conversation_history' not in context.chat_data:
         context.chat_data['conversation_history'] = []
-
     new_entry = f"{user_name}: {user_text}"
     context.chat_data['conversation_history'].append(new_entry)
-
-    # Keep last 5 messages
     if len(context.chat_data['conversation_history']) > 5:
         context.chat_data['conversation_history'].pop(0)
-
     history_text = "\n".join(context.chat_data['conversation_history'])
-    # --- MEMORY BLOCK END ---
 
     try:
         model = genai.GenerativeModel('gemini-2.0-flash')
         
-        # 2. Enhanced Prompt to force valid JSON
+        # Enhanced Prompt
         prompt = f"""
         {SYSTEM_PROMPT}
         
@@ -287,27 +335,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         response = model.generate_content(prompt)
         ai_output = response.text.strip()
 
-        # 3. Aggressive Cleaning (The Fix)
-        # Remove markdown code blocks if Gemini adds them
+        # Aggressive JSON Cleaning
         if "```json" in ai_output:
             ai_output = ai_output.replace("```json", "").replace("```", "")
         elif "```" in ai_output:
             ai_output = ai_output.replace("```", "")
-            
         ai_output = ai_output.strip()
 
         if "IGNORE" not in ai_output:
             try:
                 data = json.loads(ai_output)
-                
-                # 4. Check if we have minimum valid data
                 if data.get('item') and data.get('category'):
+                    # 1. Save to Local DB
                     save_to_db(user_name, data, user_text)
+                    
+                    # 2. Save to Google Sheets
+                    log_to_google_sheet(user_name, data, user_text)
+
                     logging.info(f"✅ Transaction Saved: {data.get('item')}")
                     
-                    # Optional: Confirm to user (Good for testing)
-                    # await update.message.reply_text(f"✅ Logged: {data.get('item')} ({data.get('status')})")
-
+                    # Notify user of high priority issues
                     if data.get('category') == 'issue' and data.get('sentiment', 5) <= 2:
                         await update.message.reply_text(f"⚠️ **High Priority logged at {data.get('location')}**")
                 else:
@@ -321,8 +368,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- MAIN BOOTSTRAP ---
 if __name__ == '__main__':
+    # Initialize Local DB (backup)
     init_db()
-    # No HTTP server needed here anymore! Streamlit handles it.
     
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
