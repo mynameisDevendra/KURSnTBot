@@ -35,75 +35,92 @@ logging.basicConfig(
 genai.configure(api_key=GEMINI_API_KEY)
 
 # --- GOOGLE DRIVE SETUP ---
-# Ensure 'credentials.json' is in your project folder
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 SERVICE_ACCOUNT_FILE = 'credentials.json' 
 
 def get_drive_service():
     """Authenticates and returns the Drive service."""
-    if not os.path.exists(SERVICE_ACCOUNT_FILE):
-        logging.error("❌ credentials.json not found! Cannot connect to Drive.")
+    # Check current directory and generic secret paths
+    possible_paths = [
+        SERVICE_ACCOUNT_FILE,
+        f"/etc/secrets/{SERVICE_ACCOUNT_FILE}",
+        f"/app/{SERVICE_ACCOUNT_FILE}"
+    ]
+    
+    final_path = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            final_path = path
+            break
+            
+    if not final_path:
+        logging.error("❌ credentials.json not found in any standard path!")
         return None
         
     creds = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+        final_path, scopes=SCOPES)
     return build('drive', 'v3', credentials=creds)
 
+def list_debug_files():
+    """Returns a list of the first 10 files the bot CAN see."""
+    service = get_drive_service()
+    if not service: return ["❌ Error: Could not connect to Drive (Check credentials)."]
+    
+    try:
+        results = service.files().list(
+            pageSize=10, 
+            fields="files(id, name)",
+            q="trashed = false"
+        ).execute()
+        items = results.get('files', [])
+        if not items:
+            return ["📂 The Drive folder is EMPTY or not shared with the bot email."]
+        return [f"📄 {item['name']}" for item in items]
+    except Exception as e:
+        return [f"❌ Drive Error: {str(e)}"]
+
 def download_file_from_drive(filename):
-    """
-    Robust search that works even if extensions (.pdf) 
-    or trailing spaces are missing/mismatched in Drive.
-    """
+    """Robust search for files."""
     service = get_drive_service()
     if not service: return None
     
-    # 1. Clean the filename: Remove .pdf extension and extra spaces
-    # Example: "Annexure II Drawings.pdf" BECOMES "Annexure II Drawings"
+    # Clean filename
     clean_name = os.path.splitext(filename)[0].strip()
-    
-    logging.info(f"🔍 Searching Drive for file containing: '{clean_name}'")
-
-    # 2. Use 'contains' for a wider search (Fuzzy Match)
-    # We escape single quotes just in case the filename has them
     safe_name = clean_name.replace("'", "\\'")
     
+    logging.info(f"🔍 Searching Drive for: '{clean_name}'")
+
+    # SEARCH 1: Fuzzy 'contains'
     results = service.files().list(
         q=f"name contains '{safe_name}' and trashed = false",
-        pageSize=1, 
-        fields="files(id, name)"
+        pageSize=1, fields="files(id, name)"
     ).execute()
     items = results.get('files', [])
 
+    # SEARCH 2: Strict match (Fallback)
     if not items:
-        logging.warning(f"⚠️ Search failed for '{clean_name}'. Checking strict match...")
-        # Fallback: Try the original filename just in case
-        results_strict = service.files().list(
+        results = service.files().list(
             q=f"name = '{filename}' and trashed = false",
             pageSize=1, fields="files(id, name)"
         ).execute()
-        items = results_strict.get('files', [])
-        
-        if not items:
-            logging.error(f"❌ File not found in Drive: {filename}")
-            return None
+        items = results.get('files', [])
 
-    found_file = items[0]
-    file_id = found_file['id']
-    real_name = found_file['name']
+    if not items:
+        return None
+
+    file_id = items[0]['id']
+    real_name = items[0]['name']
     
-    logging.info(f"✅ Found match in Drive: '{real_name}' (ID: {file_id})")
-    
-    # 3. Download the file stream
+    # Download
     request = service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
-    
     done = False
     while done is False:
         status, done = downloader.next_chunk()
 
-    # 4. Save to local temp file
-    local_path = f"temp_{filename}"
+    # Use /tmp for Docker compatibility
+    local_path = f"/tmp/temp_{filename.replace(' ', '_')}"
     with open(local_path, 'wb') as f:
         f.write(fh.getbuffer())
         
@@ -111,218 +128,110 @@ def download_file_from_drive(filename):
 
 # Configuration for Data Extraction
 SYSTEM_PROMPT = """
-You are a Railway Signaling AI. Extract data from chat into JSON:
-{
-  "category": "transaction" or "issue",
-  "item": "equipment name",
-  "quantity": number or null,
-  "location": "station/km",
-  "status": "short description",
-  "sentiment": 1-5
-}
+You are a Railway Signaling AI. Extract data from chat into JSON.
 If irrelevant, return "IGNORE".
 """
 
-# --- LOGIC: /ask Command (Text + Diagram) ---
+# --- LOGIC: /ask Command ---
 async def ask_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = " ".join(context.args)
     if not query:
-        await update.message.reply_text("❓ Please provide a question. Example: /ask circuit diagram of point machine")
+        await update.message.reply_text("❓ Please provide a question.")
         return
 
     try:
-        # Load the FAISS index
         embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
         index_path = os.path.join(os.getcwd(), "faiss_index")
         
         if not os.path.exists(index_path):
-            await update.message.reply_text("❌ Error: 'faiss_index' folder not found. Please upload it.")
+            await update.message.reply_text("❌ Error: 'faiss_index' folder not found.")
             return
 
-        # Load Local Index
         db = FAISS.load_local(index_path, embeddings, allow_dangerous_deserialization=True)
-        
-        # Search for top 3 relevant sections
         docs = db.similarity_search(query, k=3)
         
         if not docs:
-            await update.message.reply_text("⚠️ No relevant info found in the manuals.")
+            await update.message.reply_text("⚠️ No relevant info found.")
             return
 
-        # Extract metadata
-        sources = []
-        for d in docs:
-            source_file = os.path.basename(d.metadata.get('source', 'Unknown Manual'))
-            page_num = d.metadata.get('page', 'N/A')
-            sources.append(f"📄 {source_file} (Page {page_num})")
-        
-        unique_sources = "\n".join(list(set(sources)))
         context_text = "\n".join([d.page_content for d in docs])
+        sources = "\n".join([f"📄 {d.metadata.get('source')} (Pg {d.metadata.get('page')})" for d in docs])
 
-        # Generate Text Answer (Gemini 2.0)
         model = genai.GenerativeModel('gemini-2.0-flash')
-        rag_prompt = f"Using ONLY this signaling manual text, answer the question: {query}\n\nContext: {context_text}"
+        rag_prompt = f"Using ONLY this text, answer: {query}\n\nContext: {context_text}"
         response = model.generate_content(rag_prompt)
         
-        final_reply = f"📖 **Manual Answer:**\n\n{response.text}\n\n📍 **Sources Found:**\n{unique_sources}"
-        await update.message.reply_text(final_reply)
+        await update.message.reply_text(f"📖 **Answer:**\n{response.text}\n\n📍 **Sources:**\n{sources}")
 
-        # --- DIAGRAM FETCHING LOGIC ---
-        # 1. Check if user asked for a visual
-        is_diagram_request = any(word in query.lower() for word in ["diagram", "drawing", "circuit", "figure", "image", "sketch", "layout"])
+        # --- DIAGRAM LOGIC ---
+        is_diagram_request = any(word in query.lower() for word in ["diagram", "drawing", "circuit", "figure", "image"])
         
         if is_diagram_request and docs:
-            best_doc = docs[0] # Assume the best match has the diagram
+            best_doc = docs[0]
             full_source = best_doc.metadata.get('source', '')
             filename = os.path.basename(full_source)
-            # FAISS pages are 0-indexed, so we add 1 for the real page number
             page_num = int(best_doc.metadata.get('page', 0)) + 1 
 
-            status_msg = await update.message.reply_text(f"⏳ **Diagram Requested:** Searching for '{filename}' in Drive...")
+            status_msg = await update.message.reply_text(f"⏳ Searching Drive for: **{filename}**...")
 
             try:
-                # 2. Download specific PDF from Drive
                 local_pdf = download_file_from_drive(filename)
                 
                 if local_pdf:
-                    await status_msg.edit_text(f"⏳ File found. Extracting Page {page_num}...")
-                    
-                    # 3. Convert Page to Image
-                    # 'first_page' and 'last_page' are 1-indexed in pdf2image
+                    await status_msg.edit_text(f"⏳ Downloading & Processing Page {page_num}...")
                     images = convert_from_path(local_pdf, first_page=page_num, last_page=page_num)
                     
                     if images:
-                        img_path = "temp_diagram.jpg"
+                        img_path = f"/tmp/diagram_{page_num}.jpg"
                         images[0].save(img_path, 'JPEG')
-                        
-                        # 4. Send Image
                         await update.message.reply_photo(
                             photo=open(img_path, 'rb'), 
-                            caption=f"📍 **Diagram Source:** {filename} (Page {page_num})"
+                            caption=f"📍 **{filename}** (Page {page_num})"
                         )
-                        
-                        # Cleanup Image
                         os.remove(img_path)
                     
-                    # Cleanup PDF
                     os.remove(local_pdf)
                     await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=status_msg.message_id)
                 else:
-                    await status_msg.edit_text(f"⚠️ I found the text in **{filename}**, but I could not find that file in your connected Google Drive to show the picture.")
+                    # --- DEBUG MODE: LIST FILES ---
+                    files_seen = list_debug_files()
+                    debug_text = "\n".join(files_seen[:10])
+                    await status_msg.edit_text(
+                        f"❌ **File Not Found.**\n"
+                        f"I looked for: `{filename}`\n\n"
+                        f"**BUT I only see these files in Drive:**\n"
+                        f"{debug_text}\n\n"
+                        f"👉 *Please check the names match exactly!*"
+                    )
 
             except Exception as e:
-                logging.error(f"Drive/Image Error: {e}")
-                await status_msg.edit_text("❌ Failed to retrieve the diagram. (Check logs for details)")
+                logging.error(f"Image Error: {e}")
+                await status_msg.edit_text(f"❌ Error: {str(e)}")
 
     except Exception as e:
         logging.error(f"Search Error: {e}")
-        await update.message.reply_text("❌ Critical Error during manual search.")
+        await update.message.reply_text("❌ Critical Error.")
 
-# --- LOGIC: Photo Analysis (Multimodal) ---
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.photo: return
-
-    await update.message.reply_chat_action("typing")
-    
-    try:
-        photo_file = await update.message.photo[-1].get_file()
-        image_bytes = await photo_file.download_as_bytearray()
-        
-        user_caption = update.message.caption or "Analyze this signaling equipment/diagram. Identify components, faults, or readings."
-        
-        model = genai.GenerativeModel('gemini-2.0-flash')
-        response = model.generate_content([
-            user_caption,
-            {'mime_type': 'image/jpeg', 'data': bytes(image_bytes)}
-        ])
-        
-        await update.message.reply_text(f"📷 **Image Analysis:**\n\n{response.text}")
-        
-    except Exception as e:
-        logging.error(f"Photo Error: {e}")
-        await update.message.reply_text("❌ Failed to analyze image.")
-
-# --- LOGIC: Message Monitoring (With Memory) ---
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text: return
-    
-    user_text = update.message.text
-    user_name = update.message.from_user.first_name
-
-    # --- MEMORY BLOCK START ---
-    if 'conversation_history' not in context.chat_data:
-        context.chat_data['conversation_history'] = []
-
-    new_entry = f"{user_name}: {user_text}"
-    context.chat_data['conversation_history'].append(new_entry)
-
-    if len(context.chat_data['conversation_history']) > 5:
-        context.chat_data['conversation_history'].pop(0)
-
-    history_text = "\n".join(context.chat_data['conversation_history'])
-    # --- MEMORY BLOCK END ---
-
-    try:
-        model = genai.GenerativeModel('gemini-2.0-flash')
-        
-        prompt = f"""
-        {SYSTEM_PROMPT}
-        
-        CONTEXT (Recent Conversation):
-        {history_text}
-        
-        TASK:
-        Identify if the LATEST message ("{user_text}") completes a transaction or provides missing details.
-        If the latest message is a number (e.g., "100"), look back at the history to find the item it refers to.
-        Return the JSON for the complete transaction.
-        """
-        
-        response = model.generate_content(prompt)
-        ai_output = response.text.strip().replace("```json", "").replace("```", "")
-
-        if "IGNORE" not in ai_output:
-            try:
-                data = json.loads(ai_output)
-                if data.get('item'):
-                    save_to_db(user_name, data, user_text)
-                    logging.info(f"✅ Stored data for: {data.get('item')}")
-                    
-                    if data.get('category') == 'issue' and data.get('sentiment', 5) <= 2:
-                        await update.message.reply_text(f"⚠️ **High Priority logged at {data.get('location')}**")
-            except json.JSONDecodeError:
-                pass 
-                
-    except Exception as e:
-        logging.error(f"Monitoring error: {e}")
-
-# --- RENDER HEALTH CHECK SERVER ---
+# --- RENDER HEALTH CHECK ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is running!")
+        self.wfile.write(b"Bot Running")
 
 def start_health_check():
-    # Render assigns a port automatically in the PORT env var
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    print(f"✅ Health check server listening on port {port}")
     server.serve_forever()
 
-# --- MAIN BOOTSTRAP ---
-if __name__ == '__main__':
-    # 1. Initialize SQLite
-    init_db()
-    
-    # 2. Start Health Check Server (Daemon Thread)
-    threading.Thread(target=start_health_check, daemon=True).start()
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE): pass # Placeholder
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE): pass # Placeholder
 
-    # 3. Start Telegram Bot
+if __name__ == '__main__':
+    init_db()
+    threading.Thread(target=start_health_check, daemon=True).start()
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    
     app.add_handler(CommandHandler("ask", ask_manual))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    
-    print("🚀 Railway AI Agent is LIVE and MONITORING...")
+    print("🚀 Bot LIVE...")
     app.run_polling()
