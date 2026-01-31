@@ -3,6 +3,7 @@ import json
 import logging
 import io
 import asyncio
+import pytz # <--- Add this at the top of bot.py if missing
 from datetime import datetime
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -67,7 +68,8 @@ def log_to_google_sheet(user_name, data, raw_text):
     try:
         service = get_sheets_service()
         if not service: return
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        IST = pytz.timezone('Asia/Kolkata')
+	timestamp = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
         values = [[user_name, data.get('category'), data.get('item'), data.get('quantity'), data.get('location'), data.get('status'), data.get('sentiment'), raw_text, timestamp]]
         service.spreadsheets().values().append(spreadsheetId=SPREADSHEET_ID, range="Sheet1!A1", valueInputOption="USER_ENTERED", body={'values': values}).execute()
         logging.info(f"✅ Google Sheet Updated.")
