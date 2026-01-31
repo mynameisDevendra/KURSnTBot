@@ -1,12 +1,12 @@
 import sqlite3
 import os
-from datetime import datetime
 
-# FORCE ABSOLUTE PATH so Bot and Dashboard see the same file
-DB_NAME = os.path.join(os.getcwd(), "railway_logs.db")
+# FORCE the database to live in the main app folder
+# This prevents it from being created in temporary subfolders
+DB_NAME = "/app/railway_logs.db"
 
 def init_db():
-    """Creates the table if it doesn't exist."""
+    print(f"🔌 Connecting to Database at: {DB_NAME}")
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute('''
@@ -25,10 +25,8 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
-    print(f"✅ Database initialized at: {DB_NAME}")
 
 def save_to_db(user_name, data, raw_text):
-    """Inserts a new transaction row."""
     try:
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
@@ -47,6 +45,6 @@ def save_to_db(user_name, data, raw_text):
         ))
         conn.commit()
         conn.close()
-        print(f"💾 Saved to DB: {data.get('item')}")
+        print(f"💾 SUCCESS: Data written to {DB_NAME}")
     except Exception as e:
-        print(f"❌ Database Save Error: {e}")
+        print(f"❌ DATABASE ERROR: {e}")
