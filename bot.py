@@ -2,13 +2,12 @@ import os
 import json
 import logging
 import io
+import threading
 from datetime import datetime
 from dotenv import load_dotenv
 import google.generativeai as genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
-
-# Database Import
 from database import init_db, save_to_db
 
 # Knowledge Base Imports
@@ -27,7 +26,8 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 # --- CONFIGURATION ---
-SPREADSHEET_ID = "1JqPBe5aQJDIGPNRs3zVCMUnIU6NDpf8dUXs1oJImNTg"  # <--- PASTE YOUR ID HERE
+# The ID you provided
+SPREADSHEET_ID = "1JqPBe5aQJDIGPNRs3zVCMUnIU6NDpf8dUXs1oJImNTg"
 
 # Configure Logging
 logging.basicConfig(
@@ -39,7 +39,7 @@ logging.basicConfig(
 genai.configure(api_key=GEMINI_API_KEY)
 
 # --- GOOGLE SERVICES SETUP ---
-# Added 'spreadsheets' scope for writing to Sheets
+# Scopes for BOTH Drive (Reading PDFs) and Sheets (Writing Logs)
 SCOPES = [
     'https://www.googleapis.com/auth/drive.readonly',
     'https://www.googleapis.com/auth/spreadsheets'
@@ -86,7 +86,7 @@ def log_to_google_sheet(user_name, data, raw_text):
         service = get_sheets_service()
         if not service: return
 
-        # Prepare the row
+        # Prepare the row data
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         values = [[
             user_name,
@@ -102,9 +102,10 @@ def log_to_google_sheet(user_name, data, raw_text):
         
         body = {'values': values}
         
+        # Append to the sheet
         result = service.spreadsheets().values().append(
             spreadsheetId=SPREADSHEET_ID,
-            range="Sheet1!A1", # Adjust 'Sheet1' if your tab is named differently
+            range="Sheet1!A1", # Writes to the first available row in Sheet1
             valueInputOption="USER_ENTERED",
             body=body
         ).execute()
@@ -113,8 +114,11 @@ def log_to_google_sheet(user_name, data, raw_text):
         
     except Exception as e:
         logging.error(f"❌ Google Sheet Error: {e}")
+        # Detailed debugging tip for logs
+        if "403" in str(e):
+            logging.error("👉 HINT: You must SHARE the Google Sheet with the Service Account Email!")
 
-# --- DRIVE FILE HANDLING ---
+# --- DRIVE FILE HANDLING (Robust Search) ---
 def list_debug_files():
     """Returns a list of the first 10 files the bot CAN see."""
     service = get_drive_service()
@@ -366,11 +370,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Monitoring error: {e}")
 
+# --- SETUP VERIFICATION ---
+def verify_setup():
+    """Runs on startup to help you identify missing permissions."""
+    print("--- STARTUP VERIFICATION ---")
+    creds = get_credentials()
+    if creds:
+        print(f"ℹ️  SERVICE ACCOUNT EMAIL: {creds.service_account_email}")
+        print("👉  ACTION REQUIRED: Copy the email above and SHARE your Google Sheet with it (Editor Access).")
+    else:
+        print("❌ CRITICAL: Credentials file not found.")
+    print("----------------------------")
+
 # --- MAIN BOOTSTRAP ---
 if __name__ == '__main__':
-    # Initialize Local DB (backup)
+    # 1. Initialize DB
     init_db()
     
+    # 2. Print the Service Account Email (So you can share the sheet!)
+    verify_setup()
+
+    # 3. Start Bot
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
     app.add_handler(CommandHandler("ask", ask_manual))
