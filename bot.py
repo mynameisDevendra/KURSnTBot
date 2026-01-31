@@ -3,7 +3,7 @@ import json
 import logging
 import io
 import asyncio
-import pytz # <--- Add this at the top of bot.py if missing
+import pytz  # <--- Add this at the top of bot.py if missing
 from datetime import datetime
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -27,7 +27,7 @@ TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 # --- CONFIGURATION ---
-SPREADSHEET_ID = "1JqPBe5aQJDIGPNRs3zVCMUnIU6NDpf8dUXs1oJImNTg" # <--- Your ID
+SPREADSHEET_ID = "1JqPBe5aQJDIGPNRs3zVCMUnIU6NDpf8dUXs1oJImNTg"  # <--- Your ID
 
 # Configure Logging
 logging.basicConfig(
@@ -40,19 +40,20 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 # --- GLOBAL VARIABLES (Memory Optimization) ---
 # We load the brain ONCE so we don't crash the server repeatedly
-VECTOR_DB = None 
+VECTOR_DB = None
 
 # --- GOOGLE SERVICES SETUP ---
 SCOPES = [
     'https://www.googleapis.com/auth/drive.readonly',
     'https://www.googleapis.com/auth/spreadsheets'
 ]
-SERVICE_ACCOUNT_FILE = 'credentials.json' 
+SERVICE_ACCOUNT_FILE = 'credentials.json'
 
 def get_credentials():
     possible_paths = [SERVICE_ACCOUNT_FILE, f"/etc/secrets/{SERVICE_ACCOUNT_FILE}", f"/app/{SERVICE_ACCOUNT_FILE}"]
     for path in possible_paths:
-        if os.path.exists(path): return service_account.Credentials.from_service_account_file(path, scopes=SCOPES)
+        if os.path.exists(path):
+            return service_account.Credentials.from_service_account_file(path, scopes=SCOPES)
     return None
 
 def get_drive_service():
@@ -69,9 +70,24 @@ def log_to_google_sheet(user_name, data, raw_text):
         service = get_sheets_service()
         if not service: return
         IST = pytz.timezone('Asia/Kolkata')
-	timestamp = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
-        values = [[user_name, data.get('category'), data.get('item'), data.get('quantity'), data.get('location'), data.get('status'), data.get('sentiment'), raw_text, timestamp]]
-        service.spreadsheets().values().append(spreadsheetId=SPREADSHEET_ID, range="Sheet1!A1", valueInputOption="USER_ENTERED", body={'values': values}).execute()
+        timestamp = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+        values = [[
+            user_name, 
+            data.get('category'), 
+            data.get('item'), 
+            data.get('quantity'), 
+            data.get('location'), 
+            data.get('status'), 
+            data.get('sentiment'), 
+            raw_text, 
+            timestamp
+        ]]
+        service.spreadsheets().values().append(
+            spreadsheetId=SPREADSHEET_ID, 
+            range="Sheet1!A1", 
+            valueInputOption="USER_ENTERED", 
+            body={'values': values}
+        ).execute()
         logging.info(f"✅ Google Sheet Updated.")
     except Exception as e:
         logging.error(f"❌ Sheet Error: {e}")
@@ -81,7 +97,11 @@ def download_file_from_drive(filename):
     service = get_drive_service()
     if not service: return None
     clean_name = os.path.splitext(filename)[0].strip().replace("'", "\\'")
-    results = service.files().list(q=f"name contains '{clean_name}' and trashed = false", pageSize=1, fields="files(id, name)").execute()
+    results = service.files().list(
+        q=f"name contains '{clean_name}' and trashed = false", 
+        pageSize=1, 
+        fields="files(id, name)"
+    ).execute()
     items = results.get('files', [])
     if not items: return None
     
@@ -90,10 +110,12 @@ def download_file_from_drive(filename):
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
     done = False
-    while done is False: status, done = downloader.next_chunk()
+    while done is False:
+        status, done = downloader.next_chunk()
 
     local_path = f"/tmp/temp_{filename.replace(' ', '_')}"
-    with open(local_path, 'wb') as f: f.write(fh.getbuffer())
+    with open(local_path, 'wb') as f:
+        f.write(fh.getbuffer())
     return local_path
 
 # --- MEMORY OPTIMIZED SEARCH ---
@@ -129,7 +151,6 @@ async def ask_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query:
         await update.message.reply_text("❓ Please provide a question.")
         return
-
 
     # 2. Check if Brain is loaded
     global VECTOR_DB
@@ -181,7 +202,8 @@ async def ask_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"CRASH in /ask: {e}")
         await update.message.reply_text("❌ Error processing request.")
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE): pass # Simplified for brevity
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE): 
+    pass # Simplified for brevity
 
 # --- MESSAGE HANDLER ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
