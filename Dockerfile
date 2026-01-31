@@ -22,4 +22,8 @@ EXPOSE 8501
 
 # 6. START COMMAND
 # We use 'sh -c' to pass the PORT variable correctly to Streamlit
-CMD ["sh", "-c", "streamlit run dashboard.py --server.port=$PORT --server.address=0.0.0.0"]
+# Give permission to run the script
+RUN chmod +x start.sh
+
+# The New Entry Point
+CMD ["sh", "start.sh"]

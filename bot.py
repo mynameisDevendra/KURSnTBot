@@ -113,6 +113,11 @@ def load_brain():
         logging.error(f"❌ Failed to load Brain: {e}")
         return None
 
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Simple check to see if bot is alive."""
+    await update.message.reply_text("🏓 Pong! I am alive and listening.")
+
+
 # --- LOGIC: /ask Command ---
 async def ask_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 1. DEBUG LOG: Prove we received the command
@@ -122,6 +127,7 @@ async def ask_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query:
         await update.message.reply_text("❓ Please provide a question.")
         return
+
 
     # 2. Check if Brain is loaded
     global VECTOR_DB
@@ -213,6 +219,7 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("ask", ask_manual))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+    app.add_handler(CommandHandler("ping", ping))
     
     print("🚀 Railway AI Agent is LIVE...")
     app.run_polling()
