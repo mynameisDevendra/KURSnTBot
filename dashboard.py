@@ -1,63 +1,117 @@
 import streamlit as st
-import pandas as pd
 import sqlite3
-import plotly.express as px
+import pandas as pd
+import os
+import sys
+import subprocess
+import time
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
 # Page Config
-st.set_page_config(page_title="Railway S&T Command Center", layout="wide")
+st.set_page_config(page_title="Railway Bot Dashboard", layout="wide")
+st.title("🚄 Railway AI Agent Dashboard")
+
+# --- DATABASE SETUP (Fixes the "no such table" error) ---
+DB_NAME = "railway_logs.db"
+
+def init_db_if_missing():
+    """Ensures the database and table exist before we try to read them."""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    # Create the 'logs' table if it doesn't exist
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_name TEXT,
+            category TEXT,
+            item TEXT,
+            quantity REAL,
+            location TEXT,
+            status TEXT,
+            sentiment INTEGER,
+            raw_text TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+# Run this immediately when the app starts
+init_db_if_missing()
+
+# --- 1. BOT CONTROL ---
+if "bot_process" not in st.session_state:
+    st.session_state.bot_process = None
+
+def start_bot():
+    if st.session_state.bot_process is None:
+        # Start bot.py as a separate process
+        st.session_state.bot_process = subprocess.Popen([sys.executable, "bot.py"])
+        st.toast("✅ Telegram Bot Started!")
+        time.sleep(2) # Give it a moment to initialize
+    else:
+        st.toast("⚠️ Bot is already running.")
+
+if st.button("🚀 Start Telegram Bot"):
+    start_bot()
+
+# --- 2. DATA VIEW ---
+st.header("📊 Live Logs")
 
 def get_data():
-    conn = sqlite3.connect('railway_data.db')
-    df = pd.read_sql_query("SELECT * FROM logs ORDER BY timestamp DESC", conn)
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        df = pd.read_sql_query("SELECT * FROM logs ORDER BY timestamp DESC", conn)
+    except Exception as e:
+        st.error(f"Error reading database: {e}")
+        df = pd.DataFrame() # Return empty if error
     conn.close()
     return df
 
-st.title("🚉 Railway S&T AI Command Center")
-st.markdown("Real-time insights from Telegram group monitoring.")
-
-# Refresh Data Button
-if st.button('🔄 Refresh Data'):
-    st.rerun()
-
-df = get_data()
-
-# EMERGENCY DEBUG: Add this line temporarily to see if data exists
-st.write(f"Raw data rows found: {len(df)}") 
-st.dataframe(df) # This will force show the raw table
+# Refresh button
+if st.button("🔄 Refresh Logs"):
+    df = get_data()
+else:
+    df = get_data()
 
 if df.empty:
-    st.info("Waiting for data from Telegram...")
+    st.info("No data found yet. Talk to the bot to generate logs!")
 else:
-    # 1. Top Level Metrics
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Logs", len(df))
-    col2.metric("Critical Issues", len(df[df['sentiment'] <= 2]))
-    col3.metric("Recent Transactions", len(df[df['category'] == 'transaction']))
+    st.dataframe(df, use_container_width=True)
 
-    # 2. Tabs for Organization
-    tab1, tab2, tab3 = st.tabs(["📦 Inventory & Logs", "🛠️ Technical Issues", "📊 Staff Vibe"])
+# --- 3. GOOGLE DRIVE DEBUGGER ---
+st.header("📂 Drive File Debugger")
+st.write("Check if the bot can see your PDF files.")
 
-    with tab1:
-        st.subheader("Material Movement & Transactions")
-        trans_df = df[df['category'] == 'transaction']
-        st.dataframe(trans_df[['timestamp', 'user_name', 'item', 'quantity', 'location', 'status']], use_container_width=True)
+SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+SERVICE_ACCOUNT_FILE = 'credentials.json'
 
-    with tab2:
-        st.subheader("Flagged Technical & General Issues")
-        issue_df = df[df['category'].isin(['technical_issue', 'organizational_issue'])]
+def get_drive_files():
+    if not os.path.exists(SERVICE_ACCOUNT_FILE):
+        return None, "❌ credentials.json not found in root folder!"
+    
+    try:
+        creds = service_account.Credentials.from_service_account_file(
+            SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+        service = build('drive', 'v3', credentials=creds)
         
-        # Color coding for urgency
-        def color_sentiment(val):
-            color = 'red' if val <= 2 else 'orange' if val == 3 else 'green'
-            return f'color: {color}'
-        
-        st.table(issue_df[['timestamp', 'category', 'item', 'location', 'status', 'sentiment']].style.applymap(color_sentiment, subset=['sentiment']))
+        results = service.files().list(
+            pageSize=50, 
+            fields="files(id, name)",
+            q="trashed = false"
+        ).execute()
+        return results.get('files', []), None
+    except Exception as e:
+        return None, str(e)
 
-    with tab3:
-        st.subheader("Organizational Sentiment Analysis")
-        # Trend chart for sentiment
-        fig = px.line(df, x='timestamp', y='sentiment', color='category', title="Sentiment Over Time")
-        st.plotly_chart(fig, use_container_width=True)
-        
-        st.write("Recent Raw Feedback:")
-        st.dataframe(df[['user_name', 'raw_text', 'sentiment']].head(10))
+if st.button("🔍 Check Drive Files"):
+    files, error = get_drive_files()
+    if error:
+        st.error(error)
+    elif not files:
+        st.warning("⚠️ Connected to Drive, but found NO files. Check sharing permissions.")
+    else:
+        file_df = pd.DataFrame(files)
+        st.success(f"✅ Found {len(files)} files")
+        st.dataframe(file_df, use_container_width=True)
