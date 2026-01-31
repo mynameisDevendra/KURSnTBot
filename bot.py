@@ -226,12 +226,16 @@ def start_health_check():
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE): pass # Placeholder
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE): pass # Placeholder
 
+# --- MAIN BOOTSTRAP ---
 if __name__ == '__main__':
     init_db()
-    threading.Thread(target=start_health_check, daemon=True).start()
+    # No HTTP server needed here anymore! Streamlit handles it.
+    
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    
     app.add_handler(CommandHandler("ask", ask_manual))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    print("🚀 Bot LIVE...")
+    
+    print("🚀 Railway AI Agent is LIVE and MONITORING...")
     app.run_polling()

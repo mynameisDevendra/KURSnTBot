@@ -1,18 +1,25 @@
-# Use a lightweight Python version
 FROM python:3.11-slim
 
-# 1. Install System Dependencies (This fixes the Image Error!)
+# 1. Install System Dependencies (Poppler + Git)
 RUN apt-get update && apt-get install -y \
     poppler-utils \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Set up the App
 WORKDIR /app
-COPY . /app
 
-# 3. Install Python Libraries
+# 2. Copy requirements first (Better caching)
+COPY requirements.txt .
+
+# 3. Install Python libraries
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 4. Start the Bot
-CMD ["python", "bot.py"]
+# 4. Copy the rest of the code
+COPY . .
+
+# 5. EXPOSE the port (Render uses 10000 usually, but Streamlit needs to be told)
+EXPOSE 8501
+
+# 6. START COMMAND
+# We use 'sh -c' to pass the PORT variable correctly to Streamlit
+CMD ["sh", "-c", "streamlit run dashboard.py --server.port=$PORT --server.address=0.0.0.0"]
