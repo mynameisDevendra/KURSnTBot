@@ -1,13 +1,17 @@
 import sqlite3
+import os
+from datetime import datetime
+
+# FORCE ABSOLUTE PATH so Bot and Dashboard see the same file
+DB_NAME = os.path.join(os.getcwd(), "railway_logs.db")
 
 def init_db():
-    conn = sqlite3.connect('railway_data.db')
-    cursor = conn.cursor()
-    # Table for material transactions and flagged issues
-    cursor.execute('''
+    """Creates the table if it doesn't exist."""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('''
         CREATE TABLE IF NOT EXISTS logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             user_name TEXT,
             category TEXT,
             item TEXT,
@@ -15,19 +19,34 @@ def init_db():
             location TEXT,
             status TEXT,
             sentiment INTEGER,
-            raw_text TEXT
+            raw_text TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     conn.commit()
     conn.close()
+    print(f"✅ Database initialized at: {DB_NAME}")
 
 def save_to_db(user_name, data, raw_text):
-    conn = sqlite3.connect('railway_data.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO logs (user_name, category, item, quantity, location, status, sentiment, raw_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (user_name, data['category'], data['item'], data.get('quantity'), 
-          data['location'], data['status'], data['sentiment'], raw_text))
-    conn.commit()
-    conn.close()
+    """Inserts a new transaction row."""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute('''
+            INSERT INTO logs (user_name, category, item, quantity, location, status, sentiment, raw_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            user_name,
+            data.get('category'),
+            data.get('item'),
+            data.get('quantity'),
+            data.get('location'),
+            data.get('status'),
+            data.get('sentiment'),
+            raw_text
+        ))
+        conn.commit()
+        conn.close()
+        print(f"💾 Saved to DB: {data.get('item')}")
+    except Exception as e:
+        print(f"❌ Database Save Error: {e}")
