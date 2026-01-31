@@ -128,7 +128,15 @@ def download_file_from_drive(filename):
 
 # Configuration for Data Extraction
 SYSTEM_PROMPT = """
-You are a Railway Signaling AI. Extract data from chat into JSON.
+You are a Railway Signaling AI. Extract data from chat into JSON:
+{
+  "category": "transaction" or "issue",
+  "item": "equipment name",
+  "quantity": number or null,
+  "location": "station/km",
+  "status": "short description",
+  "sentiment": 1-5
+}
 If irrelevant, return "IGNORE".
 """
 
@@ -212,19 +220,104 @@ async def ask_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Search Error: {e}")
         await update.message.reply_text("❌ Critical Error.")
 
-# --- RENDER HEALTH CHECK ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.wfile.write(b"Bot Running")
+# --- LOGIC: Photo Analysis (Multimodal) ---
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.photo: return
 
-def start_health_check():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    server.serve_forever()
+    await update.message.reply_chat_action("typing")
+    
+    try:
+        photo_file = await update.message.photo[-1].get_file()
+        image_bytes = await photo_file.download_as_bytearray()
+        
+        user_caption = update.message.caption or "Analyze this signaling equipment/diagram. Identify components, faults, or readings."
+        
+        model = genai.GenerativeModel('gemini-2.0-flash')
+        response = model.generate_content([
+            user_caption,
+            {'mime_type': 'image/jpeg', 'data': bytes(image_bytes)}
+        ])
+        
+        await update.message.reply_text(f"📷 **Image Analysis:**\n\n{response.text}")
+        
+    except Exception as e:
+        logging.error(f"Photo Error: {e}")
+        await update.message.reply_text("❌ Failed to analyze image.")
 
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE): pass # Placeholder
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE): pass # Placeholder
+# --- LOGIC: Message Monitoring (Improved JSON Parsing) ---
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 1. Ignore commands (lines starting with /)
+    if not update.message or not update.message.text: return
+    if update.message.text.startswith('/'): return
+    
+    user_text = update.message.text
+    user_name = update.message.from_user.first_name
+
+    # --- MEMORY BLOCK START ---
+    if 'conversation_history' not in context.chat_data:
+        context.chat_data['conversation_history'] = []
+
+    new_entry = f"{user_name}: {user_text}"
+    context.chat_data['conversation_history'].append(new_entry)
+
+    # Keep last 5 messages
+    if len(context.chat_data['conversation_history']) > 5:
+        context.chat_data['conversation_history'].pop(0)
+
+    history_text = "\n".join(context.chat_data['conversation_history'])
+    # --- MEMORY BLOCK END ---
+
+    try:
+        model = genai.GenerativeModel('gemini-2.0-flash')
+        
+        # 2. Enhanced Prompt to force valid JSON
+        prompt = f"""
+        {SYSTEM_PROMPT}
+        
+        CONTEXT (Recent Conversation):
+        {history_text}
+        
+        TASK:
+        Identify if the LATEST message ("{user_text}") implies a transaction, report, or issue.
+        - If it is just "Hello" or a question, return "IGNORE".
+        - If it is a transaction (e.g. "Sent 5 relays to Dadri"), return the JSON.
+        - IMPORTANT: Output ONLY raw JSON. Do not use Markdown formatting like ```json.
+        """
+        
+        response = model.generate_content(prompt)
+        ai_output = response.text.strip()
+
+        # 3. Aggressive Cleaning (The Fix)
+        # Remove markdown code blocks if Gemini adds them
+        if "```json" in ai_output:
+            ai_output = ai_output.replace("```json", "").replace("```", "")
+        elif "```" in ai_output:
+            ai_output = ai_output.replace("```", "")
+            
+        ai_output = ai_output.strip()
+
+        if "IGNORE" not in ai_output:
+            try:
+                data = json.loads(ai_output)
+                
+                # 4. Check if we have minimum valid data
+                if data.get('item') and data.get('category'):
+                    save_to_db(user_name, data, user_text)
+                    logging.info(f"✅ Transaction Saved: {data.get('item')}")
+                    
+                    # Optional: Confirm to user (Good for testing)
+                    # await update.message.reply_text(f"✅ Logged: {data.get('item')} ({data.get('status')})")
+
+                    if data.get('category') == 'issue' and data.get('sentiment', 5) <= 2:
+                        await update.message.reply_text(f"⚠️ **High Priority logged at {data.get('location')}**")
+                else:
+                    logging.warning(f"⚠️ Incomplete JSON: {data}")
+                    
+            except json.JSONDecodeError as e:
+                logging.error(f"❌ JSON Parse Error. AI Output: {ai_output}")
+                
+    except Exception as e:
+        logging.error(f"Monitoring error: {e}")
 
 # --- MAIN BOOTSTRAP ---
 if __name__ == '__main__':
